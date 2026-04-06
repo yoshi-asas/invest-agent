@@ -1,0 +1,5 @@
+streamlit
+yfinance
+pandas
+openai
+st-gsheets-connection
