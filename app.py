@@ -18,9 +18,9 @@ def check_password():
     expected_password = st.secrets.get("APP_PASSWORD", "0000")
     
     def password_entered():
-        if st.session_state["password"] == expected_password:
+        if st.session_state.get("password", "") == expected_password:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]
+            st.session_state["password"] = ""
         else:
             st.session_state["password_correct"] = False
 
