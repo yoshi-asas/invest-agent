@@ -104,6 +104,31 @@ st.sidebar.caption("※本アプリは投資判断の参考情報を提供する
 
 
 # ==========================================
+# yfinance キャッシュデータ取得関数（Rate Limit対策）
+# ==========================================
+import requests
+
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+})
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_yf_info(t_symbol):
+    try:
+        return yf.Ticker(t_symbol, session=yf_session).info
+    except Exception as e:
+        raise e
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_yf_dividends(t_symbol):
+    try:
+        return yf.Ticker(t_symbol, session=yf_session).dividends
+    except Exception:
+        return pd.Series(dtype='float64')
+
+
+# ==========================================
 # タブ1: 個別銘柄の深掘り分析
 # ==========================================
 with tab_single:
@@ -118,8 +143,7 @@ with tab_single:
             
         with st.spinner(f"{ticker_symbol} のリアルタイムデータを取得中..."):
             try:
-                ticker = yf.Ticker(ticker_symbol)
-                info = ticker.info
+                info = get_yf_info(ticker_symbol)
 
                 # 企業名・セクターを日本語化
                 raw_name = info.get('shortName', ticker_symbol)
@@ -142,7 +166,7 @@ with tab_single:
                 ex_div_timestamp = info.get('exDividendDate')
                 ex_div_date = datetime.datetime.fromtimestamp(ex_div_timestamp).strftime('%m/%d') if ex_div_timestamp else ""
                 
-                dividends = ticker.dividends
+                dividends = get_yf_dividends(ticker_symbol)
                 div_months_str = "N/A"
                 if not dividends.empty:
                     try:
@@ -212,7 +236,7 @@ with tab_single:
                 # 過去の配当推移と累進配当（連続減配なし）の計算
                 # =================================================
                 st.markdown("##### 💰 過去の配当実績（年間推移）")
-                dividends = ticker.dividends
+                dividends = get_yf_dividends(ticker_symbol)
                 
                 div_trend_str = "データなし"
                 progressive_years = 0
@@ -448,7 +472,7 @@ with tab_batch:
                 time.sleep(0.5) # API過負荷防止のウェイト
                 
                 try:
-                    info = yf.Ticker(t).info
+                    info = get_yf_info(t)
                     current_price = info.get('currentPrice')
                     high_52 = info.get('fiftyTwoWeekHigh')
                     
@@ -573,7 +597,7 @@ with tab_portfolio:
                                 
                             with st.spinner("企業名を取得中..."):
                                 try:
-                                    info_data = yf.Ticker(t_sym).info
+                                    info_data = get_yf_info(t_sym)
                                     raw_n = info_data.get('shortName', t_sym)
                                     company_name, _ = get_jp_company_info(t_sym, raw_n, '')
                                 except Exception:
@@ -631,7 +655,7 @@ with tab_portfolio:
                                     
                                 with st.spinner("情報取得中..."):
                                     try:
-                                        info_data = yf.Ticker(t_sym).info
+                                        info_data = get_yf_info(t_sym)
                                         raw_n = info_data.get('shortName', t_sym)
                                         company_name, _ = get_jp_company_info(t_sym, raw_n, '')
                                         current_price = info_data.get('currentPrice', 0)
@@ -692,7 +716,7 @@ with tab_portfolio:
                                     
                                 with st.spinner("情報取得中..."):
                                     try:
-                                        info_data = yf.Ticker(t_sym).info
+                                        info_data = get_yf_info(t_sym)
                                         raw_n = info_data.get('shortName', t_sym)
                                         company_name, _ = get_jp_company_info(t_sym, raw_n, '')
                                     except Exception:
