@@ -106,24 +106,17 @@ st.sidebar.caption("※本アプリは投資判断の参考情報を提供する
 # ==========================================
 # yfinance キャッシュデータ取得関数（Rate Limit対策）
 # ==========================================
-import requests
-
-yf_session = requests.Session()
-yf_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-})
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yf_info(t_symbol):
     try:
-        return yf.Ticker(t_symbol, session=yf_session).info
+        return yf.Ticker(t_symbol).info
     except Exception as e:
         raise e
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yf_dividends(t_symbol):
     try:
-        return yf.Ticker(t_symbol, session=yf_session).dividends
+        return yf.Ticker(t_symbol).dividends
     except Exception:
         return pd.Series(dtype='float64')
 
