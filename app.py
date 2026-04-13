@@ -538,6 +538,7 @@ with tab_watch:
                 st.markdown("スプレッドシートに登録された銘柄に異常がないか確認し、Discordへ通知します。")
                 alert_drop_pct = st.number_input("⚠️【高値下落】52週高値から何%下落したら「暴落」？", value=15.0, step=1.0)
                 alert_yield_pct = st.number_input("💰【高配当】配当利回りが何%以上になったら「高配当化」？", value=4.0, step=0.1)
+                alert_days_before = st.number_input("📅【決算接近】決算の何日前に入ったら通知する？", value=14, step=1)
                 
                 if st.button("🚀 登録銘柄を一斉スキャン", type="primary"):
                     if not df.empty and "銘柄コード" in df.columns:
@@ -587,14 +588,45 @@ with tab_watch:
                                             div_yield = div_yield / 100
                                     div_yield = div_yield if div_yield else 0
                                     
+                                    # --- テクニカル（移動平均線）判定 ---
+                                    trend_str = "トレンド判定不能"
+                                    sma_200 = None
+                                    hist_data = get_yf_history(t, period="1y")
+                                    if not hist_data.empty and len(hist_data) > 50:
+                                        hist_data['SMA50'] = hist_data['Close'].rolling(window=50).mean()
+                                        hist_data['SMA200'] = hist_data['Close'].rolling(window=200).mean()
+                                        sma_50 = hist_data['SMA50'].iloc[-1]
+                                        sma_200 = hist_data['SMA200'].iloc[-1]
+                                        if pd.notna(sma_50) and pd.notna(sma_200) and current_price:
+                                            if current_price > sma_200 and sma_50 > sma_200:
+                                                trend_str = f"📈 上昇トレンド (200日線 {sma_200:,.1f} 円を上抜け)"
+                                            elif current_price < sma_200:
+                                                diff_pct = (current_price - sma_200) / sma_200 * 100
+                                                trend_str = f"📉 下降・安値圏 (200日線 {sma_200:,.1f} 円より {diff_pct:.1f}%)"
+                                            else:
+                                                trend_str = f"📊 もみ合い (200日線 {sma_200:,.1f} 円付近)"
+                                                
+                                    # --- 決算日接近判定 ---
+                                    earnings_alert = ""
+                                    e_timestamp = info.get('earningsTimestamp')
+                                    if e_timestamp:
+                                        import datetime
+                                        e_date = datetime.datetime.fromtimestamp(e_timestamp)
+                                        now = datetime.datetime.now()
+                                        days_out = (e_date - now).days
+                                        if 0 <= days_out <= alert_days_before:
+                                            earnings_alert = f"🗓️ **【決算発表目前!!】** {days_out}日後 ({e_date.strftime('%Y/%m/%d')}) に決算発表が控えています。値動きに注意！"
+
                                     stock_alerts = []
                                     if drop_pct * 100 >= alert_drop_pct:
                                         stock_alerts.append(f"⚠️ **高値から急落!!** (52週高値 {high_52} → 現在 {current_price} : **{drop_pct*100:.1f}%下落**)")
                                     if div_yield * 100 >= alert_yield_pct:
                                         stock_alerts.append(f"💰 **お宝高配当化!!** (現在の配当利回り: **{div_yield*100:.2f}%**)")
+                                    if earnings_alert:
+                                        stock_alerts.append(earnings_alert)
                                     
                                     if stock_alerts:
-                                        alert_detail = f"### 🏢 {c_name} ({t})\n💰現在値: {current_price} {currency_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
+                                        alert_detail = f"### 🏢 {c_name} ({t})\n💰現在値: {current_price} {currency_str} | {trend_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
                                         all_alerts.append(alert_detail)
                                         with result_container:
                                             st.error(alert_detail)
