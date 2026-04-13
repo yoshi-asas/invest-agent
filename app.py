@@ -85,7 +85,7 @@ st.title("📈 株式 長期保有アシスタント")
 st.markdown("個別銘柄のAI深掘り分析と、**「監視リストの一括スキャン」**による自動アラート機能を備えたダッシュボードです。")
 
 # タブで機能を分ける
-tab_single, tab_batch, tab_portfolio = st.tabs(["🔍 1. 個別分析", "📋 2. 一括スキャン", "💼 3. ポートフォリオ"])
+tab_single, tab_watch = st.tabs(["🔍 1. 個別分析", "📋 2. 注目銘柄リスト＆自動スキャン"])
 
 # ==========================================
 # サイドバー（共通設定）
@@ -119,6 +119,13 @@ def get_yf_dividends(t_symbol):
         return yf.Ticker(t_symbol).dividends
     except Exception:
         return pd.Series(dtype='float64')
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_yf_history(t_symbol, period="6mo"):
+    try:
+        return yf.Ticker(t_symbol).history(period=period)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ==========================================
@@ -313,6 +320,19 @@ with tab_single:
 
                 st.divider()
 
+                # ===== 株価チャートの表示 =====
+                st.subheader(f"📊 {company_name} の株価チャート (過去6ヶ月)")
+                hist_data = get_yf_history(ticker_symbol, period="6mo")
+                if not hist_data.empty:
+                    # tz-aware datetime index might cause issues in older streamlit versions, so we remove timezone if exists
+                    if hist_data.index.tz is not None:
+                        hist_data.index = hist_data.index.tz_localize(None)
+                    st.line_chart(hist_data['Close'])
+                else:
+                    st.write("チャートデータが取得できませんでした。")
+
+                st.divider()
+
                 # ===== Google News RSSによる日本語ニュース ======
                 st.subheader("📰 直近の関連ニュース (日本語のみ厳選)")
                 news_text_for_ai = ""
@@ -426,162 +446,62 @@ with tab_single:
                 st.error(f"データの取得に失敗しました。銘柄コードが正しいか確認してください。（エラー詳細: {e}）")
 
 # ==========================================
-# タブ2: 監視リスト一括スキャン
+# タブ2: 注目銘柄リスト ＆ 自動スキャン
 # ==========================================
-with tab_batch:
-    st.markdown("登録した複数銘柄の現在の状況を一括でスキャンし、**「設定した利回りを超えた」「高値から急落した」**などの条件に合致した優良銘柄やチャンス銘柄のみを抽出・Discord通知します。")
-    
-    watch_list_str = st.text_area("📝 監視するティッカーリスト（カンマ区切り、または改行で入力）", value="7203.T, 8058.T, 8316.T, 2914.T, AAPL, MSFT, NVDA", height=100)
-    
-    st.markdown("#### ⚙️ 発動するアラートの条件設定")
-    colA, colB = st.columns(2)
-    alert_drop_pct = colA.number_input("⚠️【高値下落アラート】52週高値から何%下落したら「暴落」と通知する？", value=15.0, step=1.0)
-    alert_yield_pct = colB.number_input("💰【お宝利回りアラート】配当利回りが何%以上になったら「高配当化」と通知する？", value=4.0, step=0.1)
-    
-    if st.button("🚀 ウォッチリストを一括スキャン", type="primary"):
-        # カンマか改行で区切られたティッカーをリスト化
-        raw_tickers = watch_list_str.replace('\\n', ',').split(',')
-        tickers_to_check = []
-        for t in raw_tickers:
-            t = t.strip().upper()
-            if t:
-                if t.isdigit() and len(t) == 4:
-                    t += ".T"
-                tickers_to_check.append(t)
-        
-        if not tickers_to_check:
-            st.warning("監視する銘柄コードを入力してください。")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            st.divider()
-            
-            all_alerts = [] # 発動したアラートを全員分貯めるリスト
-            result_container = st.container()
-            
-            for i, t in enumerate(tickers_to_check):
-                status_text.text(f"スキャン中... ({i+1}/{len(tickers_to_check)}): {t}")
-                progress_bar.progress((i + 1) / len(tickers_to_check))
-                time.sleep(0.5) # API過負荷防止のウェイト
-                
-                try:
-                    info = get_yf_info(t)
-                    current_price = info.get('currentPrice')
-                    high_52 = info.get('fiftyTwoWeekHigh')
-                    
-                    raw_currency = info.get('currency', '')
-                    currency_str = "円" if raw_currency == "JPY" else raw_currency
-                    
-                    raw_name = info.get('shortName', t)
-                    company_name, _ = get_jp_company_info(t, raw_name, "")
-                    
-                    # 1. 下落率の計算
-                    drop_pct = 0
-                    if current_price and high_52 and high_52 > 0:
-                        drop_pct = (high_52 - current_price) / high_52
-                    
-                    # 2. 配当利回りの計算
-                    div_rate = info.get('dividendRate')
-                    if div_rate and current_price and float(current_price) > 0:
-                        div_yield = div_rate / float(current_price)
-                    else:
-                        div_yield = info.get('dividendYield', 0)
-                        if div_yield and div_yield >= 1.0:
-                            div_yield = div_yield / 100
-                    div_yield = div_yield if div_yield else 0
-                    
-                    # アラート判定
-                    stock_alerts = []
-                    if drop_pct * 100 >= alert_drop_pct:
-                        stock_alerts.append(f"⚠️ **高値から急落!!** (52週高値 {high_52} → 現在 {current_price} : **{drop_pct*100:.1f}%下落**)")
-                    
-                    if div_yield * 100 >= alert_yield_pct:
-                        stock_alerts.append(f"💰 **お宝高配当化!!** (現在の配当利回り: **{div_yield*100:.2f}%**)")
-                    
-                    # ルールに引っかかったらリストに追加し、画面にも表示
-                    if stock_alerts:
-                        alert_detail = f"### 🏢 {company_name} ({t})\n💰現在値: {current_price} {currency_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
-                        all_alerts.append(alert_detail)
-                        with result_container:
-                            st.error(alert_detail)
-                        
-                except Exception as e:
-                    all_alerts.append(f"### 🏢 {t}\n- データの取得に失敗しました ({e})")
-                    with result_container:
-                        st.warning(f"⚠️ {t} のデータ取得に失敗しました。")
-            
-            status_text.text(f"スキャン完了！ (対象: {len(tickers_to_check)}銘柄)")
-            
-            st.divider()
-            if all_alerts:
-                st.success(f"🚨 スキャンの結果、**{len(all_alerts)}銘柄** でアラート（下落買い時・高配当化）が発動しました！")
-                combined_message = "### 🔔 監視リスト 定期スキャン報告\nお気に入り銘柄の中で、指定された条件に到達した銘柄があります！\n\n" + "\n\n".join(all_alerts)
-                
-                # Discord通知
-                if webhook_url:
-                    payload = {"content": combined_message}
-                    req = urllib.request.Request(
-                        webhook_url, 
-                        data=json.dumps(payload).encode("utf-8"), 
-                        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                    )
-                    try:
-                        with urllib.request.urlopen(req) as response:
-                            st.info("✅ 上記のアラート内容をまとめてDiscordに自動送信しました！")
-                    except Exception as e:
-                        st.error(f"❌ Discord一括通知に失敗しました: {e}")
-            else:
-                st.success("✅ スキャン完了。現在、アラート条件に合致する「異常な値動き」を記録した銘柄はありませんでした。")
-
-# ==========================================
-# タブ3: マイ・ポートフォリオ管理 (DB連携)
-# ==========================================
-with tab_portfolio:
-    st.markdown("### 💼 マイ・ポートフォリオ管理 (Googleスプレッドシート連携)")
-    st.write("ご自身の保有銘柄をGoogleスプレッドシート（無料データベース）に安全に記録し、クラウド上で永続化する機能です。")
+with tab_watch:
+    st.markdown("### 📋 注目銘柄リスト (Googleスプレッドシート連携)")
+    st.write("気になる銘柄とその理由を登録・管理し、ボタン一つで異常（暴落・高配当化）がないか一括スキャンします。")
     
     try:
         from streamlit_gsheets import GSheetsConnection
         
         if "connections" in st.secrets and "gsheets" in st.secrets.connections:
             conn = st.connection("gsheets", type=GSheetsConnection)
+            ws_name = "シート1"
             
-            # --- 3つのサブタブを作成 ---
-            port_tab1, port_tab2, port_tab3 = st.tabs(["💼 1. 実際の保有銘柄", "🔭 2. 長期保有の監視", "🎁 3. 株主優待の狙い目"])
-            
-            # ==================================
-            # サブタブ1: 実際の保有銘柄
-            # ==================================
-            with port_tab1:
-                ws_name = "シート1"
+            try:
+                df = conn.read(worksheet="シート1", ttl=0)
+            except:
                 try:
-                    df = conn.read(worksheet="シート1", ttl=0)
-                except:
-                    try:
-                        df = conn.read(worksheet="Sheet1", ttl=0)
-                        ws_name = "Sheet1"
-                    except Exception as inner_e:
-                        raise Exception(f"シート名が見つかりません。「シート1」または「Sheet1」が存在するか確認してください。({inner_e})")
+                    df = conn.read(worksheet="Sheet1", ttl=0)
+                    ws_name = "Sheet1"
+                except Exception as inner_e:
+                    raise Exception(f"シートが見つかりません。「シート1」が存在するか確認してください。({inner_e})")
+            
+            if df is not None:
+                # 必要なカラムが存在しない場合は補完
+                required_cols = ["銘柄コード", "企業名", "注目理由"]
+                for col in required_cols:
+                    if col not in df.columns:
+                        df[col] = ""
                 
-                if df is not None and not df.empty and len(df.columns) > 0:
-                    st.info("💡 行を選択して「Delete」キーを押すと削除できます。数値を直接クリックして書き換えることも可能です。")
-                    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="de_held")
-                    if st.button("🔄 表の変更をクラウドに保存", type="primary", key="btn_held"):
-                        conn.update(worksheet=ws_name, data=edited_df)
-                        st.success("データベースの変更を保存しました！")
-                        st.rerun()
-                else:
-                    st.info("データが登録されていません。（1行目に「保有銘柄」「企業名」「保有株数」「取得単価」という見出しを作成してください）")
+                # 表示用にカラムを絞る
+                display_df = df[required_cols]
+                
+                st.info("💡 行を選択して「Delete」キーを押すと削除できます。数値を直接クリックして書き換えることも可能です。")
+                edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True, key="de_watch")
+                
+                if st.button("🔄 リストの変更を保存", type="primary", key="btn_save_watch"):
+                    for col in edited_df.columns:
+                        df[col] = edited_df[col]
+                    conn.update(worksheet=ws_name, data=df)
+                    st.success("データベースの変更を保存しました！")
+                    st.rerun()
+            else:
+                st.info("データがありません。（1行目に「銘柄コード」「企業名」「注目理由」という見出しを作成してください）")
+                df = pd.DataFrame(columns=["銘柄コード", "企業名", "注目理由"])
+                
+            st.divider()
+            
+            col_add, col_scan = st.columns(2)
+            
+            with col_add:
+                st.markdown("#### ➕ 注目銘柄の追加")
+                with st.form("add_watch_form"):
+                    new_ticker = st.text_input("銘柄コード (例: 7203)")
+                    new_reason = st.text_input("注目理由 (任意)")
                     
-                st.divider()
-                st.markdown("#### ➕ 新規銘柄の追加 / 記録")
-                with st.form("add_stock_form"):
-                    col1, col2, col3 = st.columns(3)
-                    with col1: new_ticker = st.text_input("銘柄コード (例: 7203)")
-                    with col2: new_shares = st.number_input("保有株数", min_value=1, step=1)
-                    with col3: new_cost = st.number_input("平均取得単価", min_value=0.0, step=10.0)
-                    
-                    submitted = st.form_submit_button("💼 データベースに登録する")
+                    submitted = st.form_submit_button("📋 リリストに追加")
                     if submitted:
                         if new_ticker:
                             t_sym = new_ticker.strip().upper()
@@ -592,144 +512,120 @@ with tab_portfolio:
                                 try:
                                     info_data = get_yf_info(t_sym)
                                     raw_n = info_data.get('shortName', t_sym)
-                                    company_name, _ = get_jp_company_info(t_sym, raw_n, '')
+                                    company_name = raw_n
+                                    try:
+                                        company_name, _ = get_jp_company_info(t_sym, raw_n, '')
+                                    except:
+                                        pass
                                 except Exception:
                                     company_name = "エラー(取得不可)"
                                     
                             new_data = pd.DataFrame([{
-                                "保有銘柄": t_sym,
+                                "銘柄コード": t_sym,
                                 "企業名": company_name,
-                                "保有株数": new_shares,
-                                "取得単価": new_cost
+                                "注目理由": new_reason
                             }])
-                            updated_df = pd.concat([df, new_data], ignore_index=True) if df is not None and not df.empty else new_data
+                            updated_df = pd.concat([df, new_data], ignore_index=True) if not df.empty else new_data
                             
                             conn.update(worksheet=ws_name, data=updated_df)
                             st.success(f"{t_sym} を登録しました！")
                             st.rerun()
                         else:
                             st.error("銘柄コードを入力してください。")
-
-            # ==================================
-            # サブタブ2: 長期保有の監視
-            # ==================================
-            with port_tab2:
-                ws_name_long = "長期保有"
-                df_long = None
-                try:
-                    df_long = conn.read(worksheet=ws_name_long, ttl=0)
-                except Exception:
-                    st.warning("⚠️ Googleスプレッドシートに「長期保有」という名前のシートが見つかりません。シートを追加してください。")
+            
+            with col_scan:
+                st.markdown("#### 🚀 ウォッチリストを一括スキャン")
+                st.markdown("スプレッドシートに登録された銘柄に異常がないか確認し、Discordへ通知します。")
+                alert_drop_pct = st.number_input("⚠️【高値下落】52週高値から何%下落したら「暴落」？", value=15.0, step=1.0)
+                alert_yield_pct = st.number_input("💰【高配当】配当利回りが何%以上になったら「高配当化」？", value=4.0, step=0.1)
                 
-                if df_long is not None:
-                    if not df_long.empty and len(df_long.columns) > 0:
-                        edited_df_long = st.data_editor(df_long, num_rows="dynamic", use_container_width=True, key="de_long")
-                        if st.button("🔄 リストの変更を保存", type="primary", key="btn_long"):
-                            conn.update(worksheet=ws_name_long, data=edited_df_long)
-                            st.success("保存しました！")
-                            st.rerun()
-                    else:
-                        st.info("データがありません。（1行目に「銘柄コード」「企業名」「現在の株価」「検討理由」「目標株価」と見出しを作成してください）")
+                if st.button("🚀 登録銘柄を一斉スキャン", type="primary"):
+                    if not df.empty and "銘柄コード" in df.columns:
+                        tickers_to_check = df["銘柄コード"].dropna().astype(str).tolist()
+                        tickers_to_check = [t.strip() for t in tickers_to_check if t.strip() and t.strip() != "nan"]
                         
-                    st.divider()
-                    st.markdown("#### 🔭 監視リストへの追加")
-                    with st.form("add_long_form"):
-                        c1, c2, c3 = st.columns(3)
-                        with c1: t_long = st.text_input("銘柄コード (例: 8058)")
-                        with c2: reason = st.text_input("検討理由 (例: 業績改善等)")
-                        with c3: price_target = st.number_input("目標購入株価", min_value=0.0)
-                        
-                        submitted_long = st.form_submit_button("🔭 監視リストに登録する")
-                        if submitted_long:
-                            if t_long:
-                                t_sym = t_long.strip().upper()
-                                if t_sym.isdigit() and len(t_sym) == 4:
-                                    t_sym += ".T"
+                        if not tickers_to_check:
+                            st.warning("スキャン対象の銘柄がリストにありません。")
+                        else:
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            st.divider()
+                            
+                            all_alerts = []
+                            result_container = st.container()
+                            
+                            for i, t in enumerate(tickers_to_check):
+                                status_text.text(f"スキャン中... ({i+1}/{len(tickers_to_check)}): {t}")
+                                progress_bar.progress((i + 1) / len(tickers_to_check))
+                                time.sleep(0.5)
+                                
+                                try:
+                                    info = get_yf_info(t)
+                                    current_price = info.get('currentPrice')
+                                    high_52 = info.get('fiftyTwoWeekHigh')
                                     
-                                with st.spinner("情報取得中..."):
-                                    try:
-                                        info_data = get_yf_info(t_sym)
-                                        raw_n = info_data.get('shortName', t_sym)
-                                        company_name, _ = get_jp_company_info(t_sym, raw_n, '')
-                                        current_price = info_data.get('currentPrice', 0)
-                                    except Exception:
-                                        company_name = "エラー"
-                                        current_price = 0
-                                        
-                                new_data = pd.DataFrame([{
-                                    "銘柄コード": t_sym,
-                                    "企業名": company_name,
-                                    "現在の株価": current_price,
-                                    "検討理由": reason,
-                                    "目標株価": price_target
-                                }])
-                                updated_df = pd.concat([df_long, new_data], ignore_index=True) if not df_long.empty else new_data
-                                conn.update(worksheet=ws_name_long, data=updated_df)
-                                st.success(f"{t_sym} を登録しました！")
-                                st.rerun()
-                            else:
-                                st.error("入力してください。")
-
-            # ==================================
-            # サブタブ3: 株主優待の狙い目
-            # ==================================
-            with port_tab3:
-                ws_name_perk = "株主優待"
-                df_perk = None
-                try:
-                    df_perk = conn.read(worksheet=ws_name_perk, ttl=0)
-                except Exception:
-                    st.warning("⚠️ Googleスプレッドシートに「株主優待」という名前のシートが見つかりません。シートを追加してください。")
-                
-                if df_perk is not None:
-                    if not df_perk.empty and len(df_perk.columns) > 0:
-                        edited_df_perk = st.data_editor(df_perk, num_rows="dynamic", use_container_width=True, key="de_perk")
-                        if st.button("🔄 リストの変更を保存", type="primary", key="btn_perk"):
-                            conn.update(worksheet=ws_name_perk, data=edited_df_perk)
-                            st.success("保存しました！")
-                            st.rerun()
-                    else:
-                        st.info("データがありません。（1行目に「銘柄コード」「企業名」「優待内容」「権利確定月」「最低保有株数」と見出しを作成してください）")
-                        
-                    st.divider()
-                    st.markdown("#### 🎁 優待リストへの追加")
-                    with st.form("add_perk_form"):
-                        c1, c2, c3, c4 = st.columns(4)
-                        with c1: t_perk = st.text_input("銘柄コード")
-                        with c2: perk_desc = st.text_input("優待内容 (例: お米2kg)")
-                        with c3: month = st.text_input("権利確定月 (例: 3月/9月)")
-                        with c4: min_shares = st.number_input("最低保有株数", min_value=1, value=100)
-                        
-                        submitted_perk = st.form_submit_button("🎁 優待リストに登録する")
-                        if submitted_perk:
-                            if t_perk:
-                                t_sym = t_perk.strip().upper()
-                                if t_sym.isdigit() and len(t_sym) == 4:
-                                    t_sym += ".T"
+                                    raw_currency = info.get('currency', '')
+                                    currency_str = "円" if raw_currency == "JPY" else raw_currency
                                     
-                                with st.spinner("情報取得中..."):
+                                    raw_name = info.get('shortName', t)
+                                    c_name = raw_name
                                     try:
-                                        info_data = get_yf_info(t_sym)
-                                        raw_n = info_data.get('shortName', t_sym)
-                                        company_name, _ = get_jp_company_info(t_sym, raw_n, '')
-                                    except Exception:
-                                        company_name = "エラー"
+                                        c_name, _ = get_jp_company_info(t, raw_name, "")
+                                    except:
+                                        pass
+                                    
+                                    drop_pct = 0
+                                    if current_price and high_52 and high_52 > 0:
+                                        drop_pct = (high_52 - current_price) / high_52
+                                    
+                                    div_rate = info.get('dividendRate')
+                                    if div_rate and current_price and float(current_price) > 0:
+                                        div_yield = div_rate / float(current_price)
+                                    else:
+                                        div_yield = info.get('dividendYield', 0)
+                                        if div_yield and div_yield >= 1.0:
+                                            div_yield = div_yield / 100
+                                    div_yield = div_yield if div_yield else 0
+                                    
+                                    stock_alerts = []
+                                    if drop_pct * 100 >= alert_drop_pct:
+                                        stock_alerts.append(f"⚠️ **高値から急落!!** (52週高値 {high_52} → 現在 {current_price} : **{drop_pct*100:.1f}%下落**)")
+                                    if div_yield * 100 >= alert_yield_pct:
+                                        stock_alerts.append(f"💰 **お宝高配当化!!** (現在の配当利回り: **{div_yield*100:.2f}%**)")
+                                    
+                                    if stock_alerts:
+                                        alert_detail = f"### 🏢 {c_name} ({t})\n💰現在値: {current_price} {currency_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
+                                        all_alerts.append(alert_detail)
+                                        with result_container:
+                                            st.error(alert_detail)
                                         
-                                new_data = pd.DataFrame([{
-                                    "銘柄コード": t_sym,
-                                    "企業名": company_name,
-                                    "優待内容": perk_desc,
-                                    "権利確定月": month,
-                                    "最低保有株数": min_shares
-                                }])
-                                updated_df = pd.concat([df_perk, new_data], ignore_index=True) if not df_perk.empty else new_data
-                                conn.update(worksheet=ws_name_perk, data=updated_df)
-                                st.success(f"{t_sym} を登録しました！")
-                                st.rerun()
+                                except Exception as e:
+                                    all_alerts.append(f"### 🏢 {t}\n- データの取得に失敗しました ({e})")
+                                    with result_container:
+                                        st.warning(f"⚠️ {t} のデータ取得に失敗しました。")
+                            
+                            status_text.text(f"スキャン完了！ (対象: {len(tickers_to_check)}銘柄)")
+                            st.divider()
+                            if all_alerts:
+                                st.success(f"🚨 スキャンの結果、**{len(all_alerts)}銘柄** でアラートが発動しました！")
+                                import urllib.request, json
+                                combined_message = "### 🔔 監視リスト 定期スキャン報告\n\n" + "\n\n".join(all_alerts)
+                                
+                                if webhook_url:
+                                    payload = {"content": combined_message}
+                                    req = urllib.request.Request(webhook_url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
+                                    try:
+                                        urllib.request.urlopen(req)
+                                        st.info("✅ Discordに自動送信しました！")
+                                    except Exception as e:
+                                        st.error(f"❌ Discord自動通知に失敗しました: {e}")
                             else:
-                                st.error("入力してください。")
+                                st.success("✅ スキャン完了。現在、アラート条件に合致する銘柄はありませんでした。")
+                    else:
+                        st.warning("スキャン対象の銘柄がリストにありません。")
+                        
         else:
-            st.warning("💡 現在、Googleスプレッドシートとの接続用のカギ（Secrets APIキー）が設定されていません。\n\nAIからのガイドに沿って連携用キーを取得し、完了させましょう！")
+            st.warning("💡 現在、Googleスプレッドシートとの接続用のカギ（Secrets APIキー）が設定されていません。")
             
     except Exception as e:
-        st.error(f"データベース接続に失敗しました。ライブラリの不足、または接続設定を確認してください: {e}")
+        st.error(f"データベース機能でエラーが発生しました: {e}")
