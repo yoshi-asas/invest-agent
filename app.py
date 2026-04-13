@@ -538,8 +538,10 @@ with tab_watch:
                 st.markdown("スプレッドシートに登録された銘柄に異常がないか確認し、Discordへ通知します。")
                 alert_drop_pct = st.number_input("⚠️【高値下落】52週高値から何%下落したら「暴落」？", value=15.0, step=1.0)
                 alert_yield_pct = st.number_input("💰【高配当】配当利回りが何%以上になったら「高配当化」？", value=4.0, step=0.1)
-                alert_days_before = st.number_input("📅【決算接近】決算の何日前に入ったら通知する？", value=14, step=1)
-                
+                alert_target_pct = st.number_input("🎯【目標株価】アナリスト目標から何%割安なら通知する？", value=20.0, step=1.0)
+                alert_days_before = st.number_input("📅【イベント接近】決算や配当権利日の何日前に入ったら通知する？", value=14, step=1)
+                alert_rsi = st.number_input("📉【RSI大底】RSI(14日)がいくつ以下になったら大底判定とする？", value=30.0, step=1.0)
+                alert_payout_pct = st.number_input("🚨【減配リスク】配当性向が何%を超えたら警告する？", value=80.0, step=1.0)
                 if st.button("🚀 登録銘柄を一斉スキャン", type="primary"):
                     if not df.empty and "銘柄コード" in df.columns:
                         tickers_to_check = df["銘柄コード"].dropna().astype(str).tolist()
@@ -588,15 +590,26 @@ with tab_watch:
                                             div_yield = div_yield / 100
                                     div_yield = div_yield if div_yield else 0
                                     
-                                    # --- テクニカル（移動平均線）判定 ---
+                                    # --- テクニカル（移動平均線・RSI）判定 ---
                                     trend_str = "トレンド判定不能"
                                     sma_200 = None
+                                    current_rsi = None
                                     hist_data = get_yf_history(t, period="1y")
                                     if not hist_data.empty and len(hist_data) > 50:
                                         hist_data['SMA50'] = hist_data['Close'].rolling(window=50).mean()
                                         hist_data['SMA200'] = hist_data['Close'].rolling(window=200).mean()
+                                        
+                                        # RSI(14)計算
+                                        delta = hist_data['Close'].diff()
+                                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                                        rs = gain / loss
+                                        hist_data['RSI'] = 100 - (100 / (1 + rs))
+                                        
                                         sma_50 = hist_data['SMA50'].iloc[-1]
                                         sma_200 = hist_data['SMA200'].iloc[-1]
+                                        current_rsi = hist_data['RSI'].iloc[-1]
+                                        
                                         if pd.notna(sma_50) and pd.notna(sma_200) and current_price:
                                             if current_price > sma_200 and sma_50 > sma_200:
                                                 trend_str = f"📈 上昇トレンド (200日線 {sma_200:,.1f} 円を上抜け)"
@@ -606,24 +619,57 @@ with tab_watch:
                                             else:
                                                 trend_str = f"📊 もみ合い (200日線 {sma_200:,.1f} 円付近)"
                                                 
-                                    # --- 決算日接近判定 ---
-                                    earnings_alert = ""
+                                    import datetime
+                                    now = datetime.datetime.now()
+                                    
+                                    # --- イベント日接近判定 ---
+                                    event_alerts = []
+                                    # 決算日
                                     e_timestamp = info.get('earningsTimestamp')
                                     if e_timestamp:
-                                        import datetime
                                         e_date = datetime.datetime.fromtimestamp(e_timestamp)
-                                        now = datetime.datetime.now()
                                         days_out = (e_date - now).days
                                         if 0 <= days_out <= alert_days_before:
-                                            earnings_alert = f"🗓️ **【決算発表目前!!】** {days_out}日後 ({e_date.strftime('%Y/%m/%d')}) に決算発表が控えています。値動きに注意！"
+                                            event_alerts.append(f"🗓️ **【決算目前】** {days_out}日後 ({e_date.strftime('%Y/%m/%d')}) に決算発表があります！")
+                                    # 権利落ち日
+                                    div_timestamp = info.get('exDividendDate')
+                                    if div_timestamp:
+                                        d_date = datetime.datetime.fromtimestamp(div_timestamp)
+                                        days_out = (d_date - now).days
+                                        if 0 <= days_out <= alert_days_before:
+                                            event_alerts.append(f"🎁 **【権利日目前】** {days_out}日後 ({d_date.strftime('%Y/%m/%d')}) が配当落ち日です！")
 
                                     stock_alerts = []
+                                    # 既存：高値下落＆高配当 化
                                     if drop_pct * 100 >= alert_drop_pct:
                                         stock_alerts.append(f"⚠️ **高値から急落!!** (52週高値 {high_52} → 現在 {current_price} : **{drop_pct*100:.1f}%下落**)")
                                     if div_yield * 100 >= alert_yield_pct:
                                         stock_alerts.append(f"💰 **お宝高配当化!!** (現在の配当利回り: **{div_yield*100:.2f}%**)")
-                                    if earnings_alert:
-                                        stock_alerts.append(earnings_alert)
+                                        
+                                    # 新規①：目標株価
+                                    target_price = info.get('targetMeanPrice')
+                                    if target_price and current_price and current_price > 0:
+                                        target_diff = (target_price - current_price) / current_price * 100
+                                        if target_diff >= alert_target_pct:
+                                            stock_alerts.append(f"🎯 **超割安放置株!!** アナリスト平均目標株価({target_price})に対して現在値が約 **{target_diff:.1f}%も割安** です。")
+                                            
+                                    # 新規②：RSI大底検知
+                                    if current_rsi and current_rsi <= alert_rsi:
+                                        stock_alerts.append(f"📉 **【大底検知】** RSIが **{current_rsi:.1f}** まで低下しており、パニック的な売られすぎ水準にあります。")
+                                        
+                                    # 新規③：減配リスク警告
+                                    payout_ratio = info.get('payoutRatio')
+                                    if payout_ratio is not None and payout_ratio * 100 >= alert_payout_pct:
+                                        stock_alerts.append(f"🚨 **【減配リスク警戒】** 配当性向が **{payout_ratio*100:.1f}%** と極めて高く、無理して配当を出しているため減配リスクがあります。")
+                                        
+                                    # イベント通知を追加
+                                    stock_alerts.extend(event_alerts)
+                                    
+                                    if stock_alerts:
+                                        alert_detail = f"### 🏢 {c_name} ({t})\n💰現在値: {current_price} {currency_str} | {trend_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
+                                        all_alerts.append(alert_detail)
+                                        with result_container:
+                                            st.error(alert_detail)
                                     
                                     if stock_alerts:
                                         alert_detail = f"### 🏢 {c_name} ({t})\n💰現在値: {current_price} {currency_str} | {trend_str}\n" + "\n".join([f"- {a}" for a in stock_alerts])
