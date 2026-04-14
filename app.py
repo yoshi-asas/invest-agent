@@ -85,7 +85,7 @@ st.title("📈 株式 長期保有アシスタント")
 st.markdown("個別銘柄のAI深掘り分析と、**「監視リストの一括スキャン」**による自動アラート機能を備えたダッシュボードです。")
 
 # タブで機能を分ける
-tab_single, tab_watch = st.tabs(["🔍 1. 個別分析", "📋 2. 注目銘柄リスト＆自動スキャン"])
+tab_single, tab_watch, tab_discover = st.tabs(["🔍 1. 個別分析", "📋 2. 注目銘柄＆スキャン", "🚀 3. テンバガー発掘エージェント"])
 
 # ==========================================
 # サイドバー（共通設定）
@@ -707,3 +707,141 @@ with tab_watch:
             
     except Exception as e:
         st.error(f"データベース機能でエラーが発生しました: {e}")
+
+# ==========================================
+# タブ3: テンバガー発掘エージェント
+# ==========================================
+with tab_discover:
+    st.markdown("### 🚀 テンバガー発掘エージェント (自律型AI探索)")
+    st.write("AI自身が「次に来る未来のメガトレンド」を予測し、関連する小型成長株をリストアップして財務（テンバガーの素質）を審査します。")
+    
+    if not api_key:
+        st.warning("💡 この機能を使用するには、サイドバーからOpenAI APIキーを入力してください。")
+    else:
+        st.info("⚠️ 注意: 日本株と米国株（小型株中心）を対象に探索を行います。yfinanceのデータ取得状況により、一部の銘柄がスキップされる場合があります。")
+        
+        if st.button("🤖 AI発掘エージェントを起動 (探索開始)", type="primary"):
+            progress_text = "AIが世界のマクロ経済・技術動向から「今後10年で市場規模が数十倍になるメガトレンド3つ」を考案中..."
+            my_bar = st.progress(0, text=progress_text)
+            
+            try:
+                client = openai.OpenAI(api_key=api_key)
+                
+                # STEP 1: AIテーマ＆銘柄生成
+                ai_prompt = """
+あなたは世界最高のベンチャーキャピタリスト・長期投資家です。
+今後10年間で市場規模が爆発的（数十倍）に成長する可能性が高い「次世代メガトレンド」を3つ予測してください。
+そして、その各メガトレンドに関連する「日米の上場企業で、まだ時価総額が比較的小さく（約2兆円=150億ドル以下が目安）、成長余地が大きいテンバガー候補銘柄」を3つずつ（計9銘柄）ピックアップしてください。日本株も必ず含めてください。
+
+以下のJSON形式で必ず出力してください（他のテキストを含めないこと）。
+{
+  "themes": [
+    {
+      "theme_name": "テーマ名（例: 脳波インターフェース等の具体的な未来技術）",
+      "reason": "なぜこのテーマが10年後に爆発的に成長するのか、簡潔で熱い解説（約100文字）",
+      "tickers": [
+        {
+          "symbol": "ティッカーシンボル（米国株はそのまま、日本株は末尾に .T を付けること。例: 7203.T, PLTR）",
+          "company_name": "企業名"
+        }
+      ]
+    }
+  ]
+}
+"""
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": ai_prompt}],
+                    response_format={ "type": "json_object" },
+                    max_tokens=1500
+                )
+                
+                my_bar.progress(30, text="AIがテーマと候補リストの生成を完了。yfinanceを通じた財務スクリーニングを開始します...")
+                
+                import json
+                ai_result = json.loads(response.choices[0].message.content)
+                themes = ai_result.get("themes", [])
+                
+                st.divider()
+                st.subheader("💡 AIが予測した次世代メガトレンドと発掘銘柄")
+                
+                total_tickers_to_check = sum([len(th.get("tickers", [])) for th in themes])
+                checked_count = 0
+                
+                for theme in themes:
+                    st.markdown(f"#### 🌐 トレンド: **{theme.get('theme_name')}**")
+                    st.write(f"**【AIの選定理由】** {theme.get('reason')}")
+                    
+                    valid_candidates = []
+                    
+                    for raw_ticker in theme.get("tickers", []):
+                        t_sym = raw_ticker.get("symbol", "").upper().strip()
+                        c_name = raw_ticker.get("company_name", "")
+                        
+                        if t_sym:
+                            checked_count += 1
+                            my_bar.progress(30 + int(70 * (checked_count / total_tickers_to_check)), text=f"スクリーニング中: {t_sym} ({c_name})...")
+                            
+                            try:
+                                info = get_yf_info(t_sym)
+                                mcap = info.get('marketCap')
+                                rev_growth = info.get('revenueGrowth')
+                                current_price = info.get('currentPrice')
+                                currency = info.get('currency', '')
+                                
+                                # yfinanceバグでデータが取れない場合もあるので緩和
+                                if mcap is None:
+                                    continue
+                                
+                                # 時価総額チェック (ドル換算で約15B以下をターゲット)
+                                # 日本円の場合は150で割って概算ドルに
+                                mcap_usd = mcap
+                                if currency == "JPY":
+                                    mcap_usd = mcap / 150
+                                    mcap_str = f"{mcap / 100000000:,.0f}億円"
+                                else:
+                                    mcap_str = f"${mcap / 1000000000:,.1f} Billion"
+                                
+                                # 成長率チェック (直近がマイナスなら除外。nanの場合は不明として通す)
+                                growth_str = "不明"
+                                if rev_growth is not None:
+                                    if rev_growth < 0:
+                                        continue # 足切り（成長していない）
+                                    growth_str = f"{rev_growth * 100:.1f}%"
+                                    
+                                # 時価総額 15 Billion USD 以上の大企業は除外 (足切り)
+                                if mcap_usd > 15000000000:
+                                    continue
+                                
+                                valid_candidates.append({
+                                    "symbol": t_sym,
+                                    "name": c_name,
+                                    "price": current_price,
+                                    "currency": currency,
+                                    "mcap": mcap_str,
+                                    "growth": growth_str
+                                })
+                                
+                                time.sleep(0.5) # API制限回避
+                            except Exception as e:
+                                pass # エラーの銘柄はスキップ
+                    
+                    if valid_candidates:
+                        cols = st.columns(len(valid_candidates))
+                        for idx, cand in enumerate(valid_candidates):
+                            with cols[idx]:
+                                st.success(f"**{cand['name']}** ({cand['symbol']})")
+                                cur_sym = "円" if cand['currency'] == "JPY" else cand['currency']
+                                st.write(f"- 現在値: {cand['price']} {cur_sym}")
+                                st.write(f"- 時価総額: {cand['mcap']}")
+                                st.write(f"- 売上成長率: {cand['growth']}")
+                    else:
+                        st.warning("AIが推薦した銘柄はすべて「時価総額が大きすぎる」または「売上成長がマイナス」のため、yfinanceスクリーニングで足切りされました。真のテンバガー候補は見つかりませんでした。")
+                    
+                    st.markdown("---")
+                
+                my_bar.progress(100, text="発掘エージェントの処理が完了しました！")
+                st.balloons()
+                
+            except Exception as e:
+                st.error(f"AIエージェントの実行でエラーが発生しました。APIキーや通信状況をご確認ください。詳細: {e}")
