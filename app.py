@@ -773,6 +773,7 @@ with tab_discover:
                     st.write(f"**【AIの選定理由】** {theme.get('reason')}")
                     
                     valid_candidates = []
+                    rejected_candidates = []
                     
                     for raw_ticker in theme.get("tickers", []):
                         t_sym = raw_ticker.get("symbol", "").upper().strip()
@@ -789,12 +790,13 @@ with tab_discover:
                                 current_price = info.get('currentPrice')
                                 currency = info.get('currency', '')
                                 
-                                # yfinanceバグでデータが取れない場合もあるので緩和
                                 if mcap is None:
+                                    rejected_candidates.append({
+                                        "symbol": t_sym, "name": c_name, "price": current_price, "currency": currency,
+                                        "mcap": "不明", "growth": "不明", "reason": "データ取得不可"
+                                    })
                                     continue
                                 
-                                # 時価総額チェック (ドル換算で約15B以下をターゲット)
-                                # 日本円の場合は150で割って概算ドルに
                                 mcap_usd = mcap
                                 if currency == "JPY":
                                     mcap_usd = mcap / 150
@@ -802,15 +804,21 @@ with tab_discover:
                                 else:
                                     mcap_str = f"${mcap / 1000000000:,.1f} Billion"
                                 
-                                # 成長率チェック (直近がマイナスなら除外。nanの場合は不明として通す)
                                 growth_str = "不明"
                                 if rev_growth is not None:
-                                    if rev_growth < 0:
-                                        continue # 足切り（成長していない）
                                     growth_str = f"{rev_growth * 100:.1f}%"
-                                    
-                                # 時価総額 15 Billion USD 以上の大企業は除外 (足切り)
+                                    if rev_growth < 0:
+                                        rejected_candidates.append({
+                                            "symbol": t_sym, "name": c_name, "price": current_price, "currency": currency,
+                                            "mcap": mcap_str, "growth": growth_str, "reason": "マイナス成長"
+                                        })
+                                        continue
+                                        
                                 if mcap_usd > 15000000000:
+                                    rejected_candidates.append({
+                                        "symbol": t_sym, "name": c_name, "price": current_price, "currency": currency,
+                                        "mcap": mcap_str, "growth": growth_str, "reason": "時価総額が大きすぎる"
+                                    })
                                     continue
                                 
                                 valid_candidates.append({
@@ -822,11 +830,16 @@ with tab_discover:
                                     "growth": growth_str
                                 })
                                 
-                                time.sleep(0.5) # API制限回避
+                                import time
+                                time.sleep(0.5)
                             except Exception as e:
-                                pass # エラーの銘柄はスキップ
+                                rejected_candidates.append({
+                                    "symbol": t_sym, "name": c_name, "price": "エラー", "currency": "",
+                                    "mcap": "エラー", "growth": "エラー", "reason": "通信エラー"
+                                })
                     
                     if valid_candidates:
+                        st.markdown("##### 🌟 真のテンバガー候補 (フィルタ通過)")
                         cols = st.columns(len(valid_candidates))
                         for idx, cand in enumerate(valid_candidates):
                             with cols[idx]:
@@ -836,10 +849,23 @@ with tab_discover:
                                 st.write(f"- 時価総額: {cand['mcap']}")
                                 st.write(f"- 売上成長率: {cand['growth']}")
                     else:
-                        st.warning("AIが推薦した銘柄はすべて「時価総額が大きすぎる」または「売上成長がマイナス」のため、yfinanceスクリーニングで足切りされました。真のテンバガー候補は見つかりませんでした。")
+                        st.warning("このテーマでは、yfinanceスクリーニングを通過したテンバガー候補は見つかりませんでした。")
+                        
+                    if rejected_candidates:
+                        st.markdown("##### ❌ 除外された推薦銘柄 (足切り)")
+                        # limit columns size to 4 to avoid overly squeezed layout if many rejected
+                        import math
+                        num_cols = min(len(rejected_candidates), 4)
+                        if num_cols > 0:
+                            cols = st.columns(num_cols)
+                            for idx, cand in enumerate(rejected_candidates):
+                                with cols[idx % num_cols]:
+                                    st.error(f"**{cand['name']}** ({cand['symbol']})")
+                                    st.caption(f"除外理由: {cand['reason']}")
+                                    st.caption(f"時価総額: {cand['mcap']}")
+                                    st.caption(f"売上成長率: {cand['growth']}")
                     
                     st.markdown("---")
-                
                 my_bar.progress(100, text="発掘エージェントの処理が完了しました！")
                 st.balloons()
                 
