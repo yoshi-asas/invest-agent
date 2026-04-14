@@ -835,7 +835,7 @@ with tab_discover:
                             except Exception as e:
                                 rejected_candidates.append({
                                     "symbol": t_sym, "name": c_name, "price": "エラー", "currency": "",
-                                    "mcap": "エラー", "growth": "エラー", "reason": "通信エラー"
+                                    "mcap": "エラー", "growth": "エラー", "reason": f"通信エラー ({str(e)})"
                                 })
                     
                     if valid_candidates:
