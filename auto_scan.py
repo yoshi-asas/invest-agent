@@ -1,8 +1,13 @@
 import yfinance as yf
 import urllib.request
 import json
+import os
 import time
 from datetime import datetime
+from dotenv import load_dotenv
+
+# 環境変数の読み込み（タスクスケジューラ等で別ディレクトリから起動されても読めるよう、スクリプトと同じ場所の .env を指定）
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 # ==========================================
 # ⚙️ 設定エリア（ここをご自身の環境に合わせて書き換えてください）
@@ -24,8 +29,8 @@ ALERT_DROP_PCT = 15.0  # 52週高値から何%下落したら「買い時急落�
 ALERT_YIELD_PCT = 4.0  # 配当利回りが何%以上になったら「お宝高配当化アラート」とするか
 
 # 3. DiscordのWebhook URL
-# ※ここに先ほど取得したWebhook URLを貼り付けてください
-WEBHOOK_URL = "https://discord.com/api/webhooks/__REMOVED__/__REMOVED__"
+# ※秘密情報のためコードには書かず、.env の DISCORD_WEBHOOK_URL に設定してください
+WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
 
 # ==========================================
 # 🚀 監視・実行プログラム 本体
@@ -87,7 +92,7 @@ def run_auto_scan():
         combined_message = f"### 🔔 【自動実行】監視リスト 定期チェック報告 ({now_str})\nお気に入り銘柄の中で、指定された条件に到達した「異常値・買い時チャンス（？）」があります！\n\n" + "\n\n".join(all_alerts)
         
         # Webhook URLが設定されている場合のみ送信
-        if WEBHOOK_URL and not WEBHOOK_URL.startswith("ここにDiscordのWebhook URL"):
+        if WEBHOOK_URL:
             payload = {"content": combined_message}
             req = urllib.request.Request(
                 WEBHOOK_URL, 
@@ -100,7 +105,7 @@ def run_auto_scan():
             except Exception as e:
                 print(f"❌ Discord一括通知に失敗しました: {e}")
         else:
-            print("⚠️ Discordへの送信は行われませんでした（Webhook URLが設定されていません）。")
+            print("⚠️ Discordへの送信は行われませんでした（.env に DISCORD_WEBHOOK_URL が設定されていません）。")
             print("送信される予定だったメッセージ内容:")
             print("\n", combined_message)
     else:
