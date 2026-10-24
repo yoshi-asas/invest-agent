@@ -1,0 +1,6 @@
+discord.py
+python-dotenv
+openai
+yfinance>=1.2.1
+pandas
+duckduckgo_search

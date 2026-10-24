@@ -1,115 +1,148 @@
-import yfinance as yf
-import urllib.request
-import json
+"""定期スキャン。手元のPC（タスクスケジューラ）でも、GitHub Actions でも、同じコードで動く。
+
+- Googleスプレッドシートに接続できる場合:
+    ウォッチリスト・スキャン条件・通知済みの状態をシートから読み、新しく発生したアラートだけをDiscordに通知し、履歴をシートに記録する
+    （Webアプリの「2. 注目銘柄＆スキャン」と同じ判定・同じ条件）
+- 接続できない場合（手元PCのみ）:
+    下の WATCHLIST と LOCAL_SETTINGS で動く（通知済み管理・履歴の記録はしない）
+
+必要な設定:
+    DISCORD_WEBHOOK_URL ... 通知先（.env または環境変数 / GitHub Actions の Secrets）
+    スプレッドシート接続 ... .streamlit/secrets.toml、または環境変数 GCP_SERVICE_ACCOUNT_JSON と SPREADSHEET_URL
+"""
 import os
-import time
-from datetime import datetime
-from dotenv import load_dotenv
+import sys
 
-# 環境変数の読み込み（タスクスケジューラ等で別ディレクトリから起動されても読めるよう、スクリプトと同じ場所の .env を指定）
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+import invest_core as core
+import invest_store
 
 # ==========================================
-# ⚙️ 設定エリア（ここをご自身の環境に合わせて書き換えてください）
+# ⚙️ 設定エリア（スプレッドシートに接続できないときだけ使われる）
 # ==========================================
-
-# 1. 自動チェックしたいティッカーシンボルのリスト
 WATCHLIST = [
-    "7203.T", # トヨタ自動車
-    "8058.T", # 三菱商事
-    "8316.T", # 三井住友FG
-    "9432.T", # NTT
-    "AAPL",   # Apple
-    "MSFT",   # Microsoft
-    "NVDA"    # NVIDIA
+    "7203.T",  # トヨタ自動車
+    "8058.T",  # 三菱商事
+    "8316.T",  # 三井住友FG
+    "9432.T",  # NTT
+    "AAPL",    # Apple
+    "MSFT",    # Microsoft
+    "NVDA",    # NVIDIA
 ]
+LOCAL_SETTINGS = {"drop_pct": 15.0, "yield_pct": 4.0}   # 他の条件は invest_core.SCAN_DEFAULTS
 
-# 2. アラート発動の条件（%）
-ALERT_DROP_PCT = 15.0  # 52週高値から何%下落したら「買い時急落アラート」とするか
-ALERT_YIELD_PCT = 4.0  # 配当利回りが何%以上になったら「お宝高配当化アラート」とするか
 
-# 3. DiscordのWebhook URL
-# ※秘密情報のためコードには書かず、.env の DISCORD_WEBHOOK_URL に設定してください
-WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+def run_auto_scan(env=None, now=None, out=print, pause=1.0):
+    """スキャンを1回実行する。終了コード（0=正常 / 1=異常）を返す"""
+    env = os.environ if env is None else env
+    in_actions = env.get("GITHUB_ACTIONS") == "true"
+    quiet = in_actions            # 公開リポジトリではログも公開されるため、銘柄名などは出力しない
+    webhook = env.get("DISCORD_WEBHOOK_URL") or env.get("WEBHOOK_URL")
+    now = now or core.now_jst()
+    out(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] ウォッチリストの一括自動スキャンを開始します...")
 
-# ==========================================
-# 🚀 監視・実行プログラム 本体
-# ==========================================
-def run_auto_scan():
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] ウォッチリストの一括自動スキャンを開始します...")
-    
-    all_alerts = []
-    
-    for i, ticker in enumerate(WATCHLIST):
-        print(f"スキャン中 ({i+1}/{len(WATCHLIST)}): {ticker}")
-        time.sleep(1) # API制限エラーを避けるための1秒待機
-        
+    if in_actions and not webhook:
+        out("❌ DISCORD_WEBHOOK_URL が設定されていません（GitHub の Settings → Secrets and variables → Actions に登録してください）。")
+        return 1
+
+    # ---- 接続とウォッチリスト・条件の読み込み
+    store, names = None, {}
+    cfg = invest_store.load_gsheets_config(None)
+    if cfg:
         try:
-            info = yf.Ticker(ticker).info
-            current_price = info.get('currentPrice')
-            high_52 = info.get('fiftyTwoWeekHigh')
-            currency = info.get('currency', '')
-            company_name = info.get('shortName', ticker)
-            
-            # --- 1. 下落率の計算 ---
-            drop_pct = 0
-            if current_price and high_52 and high_52 > 0:
-                drop_pct = (high_52 - current_price) / high_52
-            
-            # --- 2. 配当利回りの計算 ---
-            div_rate = info.get('dividendRate')
-            if div_rate and current_price and current_price != 'N/A' and float(current_price) > 0:
-                div_yield = div_rate / float(current_price)
-            else:
-                div_yield = info.get('dividendYield', 0)
-                if div_yield and div_yield >= 1.0:
-                    div_yield = div_yield / 100
-            div_yield = div_yield if div_yield else 0
-            
-            # --- 3. アラート判定 ---
-            stock_alerts = []
-            if drop_pct * 100 >= ALERT_DROP_PCT:
-                stock_alerts.append(f"⚠️ **高値から急落!!** (52週高値 {high_52} → 現在 {current_price} : **{drop_pct*100:.1f}%下落**)")
-            
-            if div_yield * 100 >= ALERT_YIELD_PCT:
-                stock_alerts.append(f"💰 **お宝高配当化!!** (現在の配当利回り: **{div_yield*100:.2f}%**)")
-            
-            # 条件に合致していればアラート集計リストへ追加
-            if stock_alerts:
-                alert_detail = f"### 🏢 {company_name} ({ticker})\n💰現在値: {current_price} {currency}\n" + "\n".join([f"- {a}" for a in stock_alerts])
-                all_alerts.append(alert_detail)
-                
+            store = invest_store.make_store(cfg)
         except Exception as e:
-            print(f"[エラー] {ticker} のデータ取得に失敗しました: {e}")
-    
-    print("-" * 40)
-    print("スキャン完了！")
-    
-    # スキャン結果の総括とDiscord通知
-    if all_alerts:
-        print(f"🚨 スキャンの結果、{len(all_alerts)}銘柄でアラート条件が発動しました。")
-        combined_message = f"### 🔔 【自動実行】監視リスト 定期チェック報告 ({now_str})\nお気に入り銘柄の中で、指定された条件に到達した「異常値・買い時チャンス（？）」があります！\n\n" + "\n\n".join(all_alerts)
-        
-        # Webhook URLが設定されている場合のみ送信
-        if WEBHOOK_URL:
-            payload = {"content": combined_message}
-            req = urllib.request.Request(
-                WEBHOOK_URL, 
-                data=json.dumps(payload).encode("utf-8"), 
-                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-            )
-            try:
-                with urllib.request.urlopen(req) as response:
-                    print("✅ Discordへアラートを自動送信しました！")
-            except Exception as e:
-                print(f"❌ Discord一括通知に失敗しました: {e}")
-        else:
-            print("⚠️ Discordへの送信は行われませんでした（.env に DISCORD_WEBHOOK_URL が設定されていません）。")
-            print("送信される予定だったメッセージ内容:")
-            print("\n", combined_message)
+            out(f"⚠️ スプレッドシートに接続できませんでした（{type(e).__name__}）。")
+    if store is None and in_actions:
+        out("❌ スプレッドシートの接続情報（GCP_SERVICE_ACCOUNT_JSON / SPREADSHEET_URL）が設定されていないか、接続できません。")
+        return 1
+    if store is not None:
+        try:
+            wl = store.load_watchlist(fresh=True)
+            settings = store.load_settings()
+        except Exception as e:
+            out(f"❌ スプレッドシートの読み込みに失敗しました（{type(e).__name__}）。")
+            return 1
+        tickers = list(dict.fromkeys(t for t in (core.normalize_ticker(c) for c in wl["銘柄コード"].tolist()) if t))
+        names = {core.normalize_ticker(c): str(n) for c, n in zip(wl["銘柄コード"], wl["企業名"])
+                 if str(n).strip() and "エラー" not in str(n)}
     else:
-        print("✅ アラート条件に合致する「異常値」を記録した銘柄はありません。（すべて通常運行です）")
+        out("ℹ️ スプレッドシートに接続せず、このファイルの WATCHLIST で実行します（通知済み管理・履歴の記録はありません）。")
+        tickers, settings = list(WATCHLIST), {**core.SCAN_DEFAULTS, **LOCAL_SETTINGS}
+    if not tickers:
+        out("スキャン対象の銘柄がありません。")
+        return 0
+
+    # ---- スキャン
+    def name_of(sym, info):
+        return names.get(sym) or core.get_jp_company_info(sym, info.get("shortName", sym), "")[0]
+
+    def progress(i, n, res):
+        out(f"スキャン中 ({i + 1}/{n})" if quiet else f"スキャン中 ({i + 1}/{n}): {res['symbol']}"
+            + (f"  [エラー] {res['error']}" if res["error"] and not quiet else ""))
+
+    results = core.scan_tickers(tickers, settings, lambda t: core.fetch_info(t, retries=2), core.fetch_history,
+                                name_fn=name_of, progress=progress, pause=pause, now=now)
+    failed = [r for r in results if r["error"]]
+    alerted = [r for r in results if r["alerts"]]
+    if len(failed) == len(results):
+        out("❌ すべての銘柄でデータ取得に失敗しました（Yahoo Finance のアクセス制限などの可能性があります）。")
+        return 1
+
+    # ---- 新規アラートの判定
+    if store is not None:
+        try:
+            state_df = store.load_state(fresh=True)
+        except Exception:
+            state_df = None
+        new_items, new_state = core.filter_new_alerts(results, state_df, now.date(), settings["renotify_days"])
+        only = new_items
+    else:
+        new_items = {(r["symbol"], a["key"]) for r in alerted for a in r["alerts"]}
+        new_state, only = None, None
+
+    out("-" * 40)
+    out(f"スキャン完了！ 対象 {len(results)}銘柄 / アラート {len(alerted)}銘柄 / 新規アラート {len(new_items)}件 / 取得失敗 {len(failed)}銘柄")
+
+    # ---- 通知
+    title = (f"### 🔔 【自動実行】監視リスト 定期チェック報告 ({now.strftime('%Y-%m-%d %H:%M:%S')})\n"
+             "お気に入り銘柄の中で、指定された条件に到達した「異常値・買い時チャンス（？）」があります！")
+    message = core.format_scan_message(results, title, only=only)
+    if message is None:
+        out("✅ 通知するアラートはありません。" if not alerted else "✅ アラートはすべて通知済みのため、送信しません。")
+    elif webhook:
+        try:
+            n = core.send_discord(webhook, message)
+            out(f"✅ Discordへアラートを自動送信しました！（{n}通）")
+        except Exception as e:
+            out(f"❌ Discord一括通知に失敗しました（{type(e).__name__}）。通知済みとして記録しません。")
+            return 1
+    else:
+        out("⚠️ Discordへの送信は行われませんでした（DISCORD_WEBHOOK_URL が設定されていません）。")
+        out("送信される予定だったメッセージ内容:")
+        out("\n" + message)
+
+    # ---- 状態・履歴の記録（通知に成功した場合、または通知するものが無かった場合だけ。送信していないのに「通知済み」にしない）
+    if store is not None and (message is None or webhook):
+        source = "actions" if in_actions else "local"
+        try:
+            store.save_state(new_state)
+            rows = core.history_rows(results, new_items, source, now)
+            if rows:
+                store.append_history(rows)
+                out(f"📜 履歴に{len(rows)}件記録しました。")
+        except Exception as e:
+            out(f"⚠️ 状態・履歴の記録に失敗しました（{type(e).__name__}）。次回、同じアラートが再通知される可能性があります。")
+    return 0
+
+
+def main():
+    try:   # 手元PCでは .env から DISCORD_WEBHOOK_URL を読む（GitHub Actions では環境変数で渡される）
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    except ImportError:
+        pass
+    sys.exit(run_auto_scan())
+
 
 if __name__ == "__main__":
-    run_auto_scan()
+    main()

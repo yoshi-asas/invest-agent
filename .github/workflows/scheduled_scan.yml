@@ -1,0 +1,37 @@
+# 平日の夕方に、ウォッチリストを自動スキャンして Discord に通知する（PCを起動していなくても動く）。
+# 設定方法は docs/操作仕様書.md の「GitHub Actions による定期スキャン」を参照。
+#
+# 注意:
+#   * このリポジトリは公開(Public)のため、実行ログも公開される。auto_scan.py は GitHub Actions 上では
+#     銘柄名や内容をログに出さず、件数だけを出力する。
+#   * 60日間リポジトリへの更新が無いと、GitHubが定期実行を自動で停止する（Actions タブから再開できる）。
+name: Scheduled scan
+
+on:
+  schedule:
+    - cron: "30 7 * * 1-5"      # 平日 16:30 JST（UTC 07:30）。東証の取引終了後
+  workflow_dispatch:            # Actions タブから手動でも実行できる
+
+concurrency:
+  group: scheduled-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run scan
+        run: python auto_scan.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}

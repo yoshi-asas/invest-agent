@@ -1,6 +1,6 @@
-streamlit
+streamlit>=1.49
 yfinance>=1.2.1
 pandas
 openai
-st-gsheets-connection
+gspread>=5.8,<7
 python-dotenv
